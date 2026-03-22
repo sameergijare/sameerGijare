@@ -1,0 +1,262 @@
+```{r}
+
+library(DBI)
+library(RSQLite)
+library(dplyr)
+library(lubridate)
+library(caTools)
+library(class)
+library(ggplot2)
+library(tidyverse)
+library(caret)
+library(Metrics)
+library(rpart)
+library(reshape2)
+
+# Function to calculate and plot variable importance
+plot_importance <- function(formula, data) {
+  
+# Extract coefficients, sort by absolute value, convert to data frame
+item_nbr<-unique(data$item_nbr)
+model <- lm(formula, data = data)
+coefs <- data.frame(Feature = names(coef(model)[-1]),
+                    Coefficient = coef(model)[-1])
+coefs$Feature <- reorder(coefs$Feature, abs(coefs$Coefficient))
+
+
+plot(ggplot(coefs, aes(x = Feature, y = Coefficient)) +
+  geom_col() +
+  coord_flip() + 
+  labs(title = paste("Feature Importance (Standardized Coefficients) Item Number " , toString(item_nbr))) +
+  theme_minimal())
+}
+
+
+#Show Charts for Visualizing Relationship
+showVisualizations <- function(df){
+  
+  item_nbr<-unique(df$item_nbr)
+  plot_importance(units~tavg+depart+dewpoint+heat+cool+sunrise+sunset+snowfall+preciptotal+stnpressure+sealevel+resultspeed+resultdir+is_weekend+is_rainy_day,df)
+  plot(ggplot(data=df, aes(x=tavg, y=units, group=1)) +
+  geom_line(color="red")+
+  geom_point() + labs(title=paste('Line Chart of Units sold by Average Temperature for Item Number ' , toString(item_nbr)) ,x="Average Temperature", y = "Number of Units Sold") + annotate("text", x = 4, y = 30, 
+           label = "Note: Line Chart of Units sold by Average Temperature.", 
+           hjust = 0, size = 4))
+  
+  plot(ggplot(data=df, aes(x=preciptotal, y=units, group=1)) +
+  geom_line(color="red")+
+  geom_point() +labs(title=paste('Line Chart of Units sold by preciptotal for Item Number ' , toString(item_nbr)),x="Precipitation Total", y = "Number of Units Sold") + annotate("text", x = 4, y = 30, 
+           label = "Note: Line Chart of Units sold by Total precipitation.", 
+           hjust = 0, size = 4))
+  
+  plot(ggplot(df, aes(x=tavg, y=units)) + geom_point()+labs(title=paste('Scatter plot of Units sold by Average Temperature for Item Number ' , toString(item_nbr)),x="Average Temperature", y = "Number of Units Sold") + annotate("text", x = 4, y = 30, 
+           label = "Note: Scatter plot of Units sold by Average Temperature.", 
+           hjust = 0, size = 4))
+  plot(ggplot(df, aes(x=preciptotal, y=units)) + geom_point() + labs(title=paste('Scatter plot of Units sold by Total precipitation for Item Number ', toString(item_nbr)),x="Total Precipitation", y = "Number of Units Sold") + annotate("text", x = 4, y = 30, 
+           label = "Note: Scatter plot of Units sold by Total precipitation.", 
+           hjust = 0, size = 4))
+  
+}
+
+
+#Tune and Evaluate Models for Effectiveness
+run_evaluate <- function(modelType,item_nbr,training_set,test_set){
+  model <- NULL
+  if(modelType == "Linear Regression"){
+    model <- lm(units~tavg+depart+dewpoint+heat+cool+sunrise+sunset+snowfall+preciptotal+stnpressure+sealevel+resultspeed+resultdir+is_weekend+is_rainy_day,data=training_set[, c(3,6,7,8,9,10,11,12,13,14,15,17,18,19,20,21,22,23,24,25)])
+    
+  }else if(modelType == "Support Vector Machine"){
+    model <- train(
+  units~tavg+depart+dewpoint+heat+cool+sunrise+sunset+snowfall+preciptotal+stnpressure+sealevel+resultspeed+resultdir+is_weekend+is_rainy_day,
+    data = training_set[, c(3,6,7,8,9,10,11,12,13,14,15,17,18,19,20,21,22,23,24,25)],
+    method = 'svmRadial',
+    na.action = na.omit,
+    preProcess = c("center", "scale"),
+    trCtrl = trainControl(method = "none")
+    )
+  }else{
+    model <- rpart(units~tavg+depart+dewpoint+heat+cool+sunrise+sunset+snowfall+preciptotal+stnpressure+sealevel+resultspeed+resultdir+is_weekend+is_rainy_day, method = "anova", data = training_set[, c(3,6,7,8,9,10,11,12,13,14,15,17,18,19,20,21,22,23,24,25)])
+    print(model)
+    plot(model, uniform = TRUE, main = paste("Units sold Decision Tree using Regression for Item Number     ",toString(item_nbr)))
+    text(model, use.n = TRUE, cex = .9)
+  }
+  print(summary(model))
+  predictions <- model %>% predict(test_set[, c(6,7,8,9,10,11,12,13,14,15,17,18,19,20,21,22,23,24,25)])
+  print(sprintf("%s RMSE Item Number %d:%f" ,modelType,item_nbr,RMSE(predictions, test_set$units)))
+  print(sprintf("%s MAE Item Number %d:%f",modelType,item_nbr, mae(test_set$units, predictions)))
+  
+  
+}
+
+#Evaluate 3 selected Models
+models_run_evaluate <- function(data){
+
+  df <- data.frame(data)
+  item_nbr<-unique(df$item_nbr)
+  if(item_nbr == 9){
+    # 1. Calculate the necessary values
+    Q1 <- quantile(df$units, .25, na.rm = TRUE)
+    Q3 <- quantile(df$units, .75, na.rm = TRUE)
+  
+    # 2. Define the bounds
+    lower_bound <- Q1
+    upper_bound <- Q3
+    # 3. Subset the data to include only values within the bounds
+    df <- subset(df, df$units >= lower_bound & df$units <= upper_bound)
+  }
+  
+  df$is_weekend <-lubridate::wday(df$date,week_start = 1)>= 6
+  df$is_rainy_day <- grepl("RA|TS|GR|SH|DZ", df$codesum, ignore.case = TRUE)
+  
+  set.seed(123)
+  split = sample.split(df, SplitRatio = 0.75)
+  training_set = subset(df, split == TRUE)
+  test_set = subset(df, split == FALSE)
+  
+  #Linear Regression
+  run_evaluate("Linear Regression",item_nbr,training_set,test_set)
+  #Support Vector Machine
+  run_evaluate("Support Vector Machine",item_nbr,training_set,test_set)
+  #Decision Trees
+  run_evaluate("Decision Trees",item_nbr,training_set,test_set)
+  showVisualizations(df)
+  return("Zero")
+  }
+
+#Calculate the missing data and replace it in dataframe
+imputeMissingData <- function(data){
+  
+  for(i in 1:nrow(data)) {
+    if(is.na(data$tmax[i])){
+      data$tmax[i] <- data$tmax[i-1]
+    }
+    if(is.na(data$tmin[i])){
+      data$tmin[i] <- data$tmin[i-1]
+    }
+    if(is.na(data$tavg[i])){
+      data$tavg[i] <- data$tavg[i-1]
+    }else if (!is.na(data$tavg[i]) && toupper(as.character(data$tavg[i])) == "T") {
+      data$tavg[i] <- 49
+    }
+    if(is.na(data$depart[i])){
+      data$depart[i] <- mean(data$depart, na.rm = TRUE)
+    }
+    if(is.na(data$dewpoint[i])){
+      data$dewpoint[i] <- mean(data$dewpoint, na.rm = TRUE)
+    }
+    if(is.na(data$wetbulb[i])){
+      data$wetbulb[i] <- mean(data$wetbulb, na.rm = TRUE)
+    }
+    if(is.na(data$heat[i])){
+      data$heat[i] <- data$heat[i-1]
+    }
+    if(is.na(data$cool[i])){
+      data$cool[i] <- data$cool[i-1]
+    }
+    if(is.na(data$sunrise[i])){
+      mean_datetime <- mean(hms(data$sunrise), na.rm = TRUE)
+      data$sunrise[i] <- mean_datetime
+    }else{
+      data$sunrise[i] <- hms(data$sunrise[i])
+    }
+    if(is.na(data$sunset[i])){
+      mean_datetime <- mean(hms(data$sunset), na.rm = TRUE)
+      data$sunset[i] <- mean_datetime
+    }else{
+      data$sunset[i] <- hms(data$sunset[i])
+    }
+    if(is.na(data$snowfall[i])){
+      data$snowfall[i] <- mean(data$snowfall, na.rm=TRUE)
+    }
+    if(is.na(data$preciptotal[i])){
+      data$preciptotal[i] <- data$preciptotal[i-1]
+    }else if (!is.na(data$preciptotal[i]) && toupper(as.character(data$preciptotal[i])) == "T") { 
+      data$preciptotal[i] <- 0.001
+    }
+    if(is.na(data$stnpressure[i])){
+      data$stnpressure[i] <- mean(data$stnpressure, na.rm = TRUE)
+    }
+    
+    if(is.na(data$sealevel[i])){
+      data$sealevel[i] <- mean(data$sealevel, na.rm = TRUE)
+    }
+    if(is.na(data$resultspeed[i])){
+      data$resultspeed[i] <- data$resultspeed[i-1]
+    }
+    if(is.na(data$resultdir[i])){
+      data$resultdir[i] <- data$resultdir[i-1]
+    }
+    if(is.na(data$avgspeed[i])){ 
+      data$avgspeed[i] <- data$avgspeed[i-1]
+    }
+  }
+  return (data)
+}
+start.time <- Sys.time()
+con <- dbConnect(RSQLite::SQLite(),
+                 "project1_raw_data/project1_raw_data.db") # connect to the DB
+
+dbListTables(con) # list database tables
+
+
+res <- dbSendQuery(con, "SELECT T.item_nbr,T.store_nbr,T.units,W.* FROM train AS T 
+JOIN
+  key AS K ON T.store_nbr = K.store_nbr
+JOIN
+  weather AS W ON K.station_nbr = W.station_nbr where T.date=W.date order by T.units desc limit 5
+")
+sales_weather <- dbFetch(res, n = -1) # Fetch all records
+
+#Exploratory Data Analysis
+#summary(sales_weather)
+
+# 3. Compute the correlation matrix
+# Use na.omit or use="complete.obs" to handle missing data
+df  <- sales_weather %>% select_if(is.numeric)
+non_na_rows <- df[rowSums(is.na(df)) < ncol(df), ]
+non_na_rows1 <- na.omit(non_na_rows)
+#print(colSums(is.na(non_na_rows1)))
+corr_mat <- round(cor(non_na_rows1),2)
+melted_corr_mat <- melt(corr_mat)
+# 4. Method A: Plotting with ggplot(Recommended)
+plot(ggplot(data = melted_corr_mat, aes(x=Var1, y=Var2,
+                                   fill=value)) + 
+geom_tile() + theme(axis.text.x = element_text(
+      angle = 60, hjust = 1, size = pmin(10, 200 / length(melted_corr_mat)))) + labs(title="Feature Corelation Matrix"))
+
+#Select top 3 sold products
+res2 <- dbSendQuery(con, "SELECT item_nbr,sum(units) from train group by item_nbr order by units desc limit 3")
+top3_products <- dbFetch(res2, n = -1)
+
+my_list <- as.list(unique(top3_products[,1]))
+
+#Using the key table, write a query to join the sales data (train) with the correct 
+#weather station using store_nbr.
+q1 <- "SELECT T.item_nbr,T.store_nbr,T.units,W.* FROM train AS T JOIN
+  key AS K ON T.store_nbr = K.store_nbr
+JOIN
+  weather AS W ON K.station_nbr = W.station_nbr where T.date=W.date"
+#Write a query to return daily sales and average temperature (tavg) for one of the top 3 
+#products.
+q2 <- "SELECT T.units,W.tavg FROM train AS T JOIN
+  key AS K ON T.store_nbr = K.store_nbr
+JOIN
+  weather AS W ON K.station_nbr = W.station_nbr where T.date=W.date and T.item_nbr=9 order by T.units desc"
+
+for (i in my_list) {
+  current_element <- i
+  res1 <- dbSendQuery(con,sprintf("SELECT T.item_nbr,T.store_nbr,T.units,W.* FROM train AS T JOIN
+  key AS K ON T.store_nbr = K.store_nbr
+JOIN
+  weather AS W ON K.station_nbr = W.station_nbr where T.date=W.date and T.item_nbr=%d order by T.units desc",current_element))
+  sales_weather_prod <- dbFetch(res1, n = -1)
+  data <-imputeMissingData(sales_weather_prod)
+  print(models_run_evaluate(data))
+}
+
+dbDisconnect(con)
+end.time <- Sys.time()
+time.taken <- round(end.time - start.time,2)
+print(time.taken)
+
+```
